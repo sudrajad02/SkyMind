@@ -2,20 +2,27 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 from src.config.db import get_db
 from src.chat.dto.chat_dto import CreateChatDTO
+from src.auth.auth_middleware import get_current_user
+from src.auth.auth_model import UserModel
 from .chat_service import create_chat, get_chats_by_session
 
 router = APIRouter(
   prefix="/chat",
-  tags=["chat"]
+  tags=["chat"],
+  dependencies=[Depends(get_current_user)]
 )
 
+@router.post("")
 @router.post("/")
-async def create_chat_endpoint(body: CreateChatDTO, db: Session = Depends(get_db)):
+async def create_chat_endpoint(
+    body: CreateChatDTO, 
+    db: Session = Depends(get_db),
+    current_user: UserModel = Depends(get_current_user)
+):
   result = create_chat(db, body)
   if result:
     return {
-      "success": True, 
-      "message": "Chat created successfully", 
+      "status": True, 
       "data": {
         "id": result.id, 
         "session_id": result.session_id,
@@ -24,14 +31,17 @@ async def create_chat_endpoint(body: CreateChatDTO, db: Session = Depends(get_db
         "created_at": result.created_at
       }
     }
-  return {"success": False, "message": "Failed to create chat", "data": None}
+  return {"status": False, "data": None, "error": "Failed to create chat"}
 
 @router.get("/{session_id}")
-async def get_chats_endpoint(session_id: int, db: Session = Depends(get_db)):
+async def get_chats_endpoint(
+    session_id: int, 
+    db: Session = Depends(get_db),
+    current_user: UserModel = Depends(get_current_user)
+):
   chats = get_chats_by_session(db, session_id)
   return {
-    "success": True,
-    "message": "Chats retrieved successfully",
+    "status": True,
     "data": [
       {
         "id": chat.id,
