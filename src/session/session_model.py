@@ -8,5 +8,6 @@ class SessionModel(Base):
 
 	id = Column(Integer, primary_key=True, autoincrement=True)
 	title = Column(String(255))
+	user_id = Column(Integer, nullable=True)
 	created_at = Column(DateTime, default=datetime.datetime.utcnow)
 	updated_at = Column(DateTime, default=datetime.datetime.utcnow)

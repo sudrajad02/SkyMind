@@ -19,7 +19,7 @@ async def create_chat_endpoint(
     db: Session = Depends(get_db),
     current_user: UserModel = Depends(get_current_user)
 ):
-  result = create_chat(db, body)
+  result = create_chat(db, body, current_user)
   if result:
     return {
       "status": True, 

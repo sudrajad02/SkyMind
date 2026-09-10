@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 from src.chat.dto.chat_dto import CreateChatDTO
 from .chat_model import ChatModel
 from src.session.session_model import SessionModel
+from src.auth.auth_model import UserModel
 import requests
 import json
 from src.weather.weather_service import find_adm4_by_location, fetch_bmkg_weather
@@ -89,11 +90,22 @@ Jawaban:
 }
 """
 
-def create_chat(db: Session, payload: CreateChatDTO):
+def create_chat(db: Session, payload: CreateChatDTO, current_user: UserModel):
   try:
     session_id = payload.session_id
     content = payload.content
     weather_json = payload.weather_json
+
+    if not session_id:
+      clean_title = payload.content.strip().replace("\n", " ")[:40]
+      new_session = SessionModel(
+        title = clean_title,
+        user_id = current_user.id
+      )
+      db.add(new_session)
+      db.commit()
+      db.refresh(new_session)
+      session_id = new_session.id
 
     lokasi = extraction_location_with_ai(content)
     print(f"Lokasi terdeksi oleh AI: {lokasi}")
@@ -191,27 +203,7 @@ def create_chat(db: Session, payload: CreateChatDTO):
     new_chat = ChatModel(session_id=session_id, content=content, sender="user", weather_json=weather_json)
     db.add(new_chat)
 
-    response = requests.post(os.getenv("AI_URL"), 
-      headers={
-        "Authorization": f"Bearer {os.getenv("API_KEY")}",
-        "Content-Type": "application/json",
-      },
-      data=json.dumps({
-        "model": os.getenv("MODEL"),
-        "messages": messages,
-        "max_tokens": 2000,
-        "temperature": 0.3
-      })
-    )
-    response_json = response.json()
-
-    # OpenRouter/OpenAI mengembalikan content di dalam choices[0].message.content
-    ai_content = ""
-    if "choices" in response_json and len(response_json["choices"]) > 0:
-      ai_content = response_json["choices"][0]["message"].get("content", "")
-    else:
-      print(f"OpenRouter Error / Response: {response_json}")
-      ai_content = "Maaf, sistem cuaca sedang sibuk. Silakan coba beberapa saat lagi."
+    ai_content = call_ai_chat(messages, max_tokens=2000, temperature=0.3)
 
     # Karena SYSTEM_PROMPT memaksa output JSON, kita parse JSON-nya
     ai_text = ai_content
@@ -268,6 +260,7 @@ def get_chats_by_session(db: Session, session_id: int):
     print(f"Error fetching chats: {e}")
     return []
 
+
 def extraction_location_with_ai(user_message: str) -> str | None:
   prompt = """Kamu adalah entitas ekstraktor lokasi. Tugasmu HANYA mengambil nama kota/kabupaten/daerah di Indonesia yang ditanyakan cuacanya oleh user.
     Aturan:
@@ -283,28 +276,11 @@ def extraction_location_with_ai(user_message: str) -> str | None:
     """
   
   try:
-    response = requests.post(os.getenv("AI_URL"), 
-      headers={
-        "Authorization": f"Bearer {os.getenv("API_KEY")}",
-        "Content-Type": "application/json",
-      },
-      data=json.dumps({
-        "model": os.getenv("MODEL"),
-        "messages": [{
-          "role": "system", 
-          "content": prompt
-        },
-        {
-          "role": "user",
-          "content": user_message
-        }],
-        "temperature": 0,
-        "max_tokens": 300
-      })
-    )
-
-    result = response.json()
-    ai_reply = result["choices"][0]["message"]["content"].strip()
+    messages = [
+      {"role": "system", "content": prompt},
+      {"role": "user", "content": user_message}
+    ]
+    ai_reply = call_ai_chat(messages, max_tokens=300, temperature=0.0).strip()
     
     if ai_reply.startswith("```"):
       ai_reply = ai_reply.split("```")[1]
@@ -312,9 +288,143 @@ def extraction_location_with_ai(user_message: str) -> str | None:
         ai_reply = ai_reply[4:]
 
     parsed_json = json.loads(ai_reply.strip())
-    
     return parsed_json.get("lokasi")
   except Exception as e:
     print(f"Error extracting location: {e}")
     return None
+
+
+def call_ai_chat(messages: list, max_tokens: int = 2000, temperature: float = 0.3) -> str:
+  """
+  Fungsi terpusat untuk memanggil AI.
+  Mendukung provider: 'openrouter' atau 'gemini' (berdasarkan setting AI_PROVIDER di .env).
+  Dilengkapi automatic fallback jika provider utama mengalami error / rate limit (429).
+  """
+  provider = (os.getenv("AI_PROVIDER") or "openrouter").strip().lower()
+
+  if provider == "gemini":
+    try:
+      return _call_gemini(messages, max_tokens, temperature)
+    except Exception as e:
+      print(f"[Gemini Error]: {e}")
+      if os.getenv("API_KEY") or os.getenv("OPENROUTER_API_KEY"):
+        print("-> Mencoba fallback ke OpenRouter...")
+        return _call_openrouter(messages, max_tokens, temperature)
+      raise e
+  else:
+    try:
+      return _call_openrouter(messages, max_tokens, temperature)
+    except Exception as e:
+      print(f"[OpenRouter Error]: {e}")
+      if os.getenv("GEMINI_API_KEY"):
+        print("-> Mencoba fallback ke Google Gemini...")
+        return _call_gemini(messages, max_tokens, temperature)
+      raise e
+
+
+def _call_openrouter(messages: list, max_tokens: int = 2000, temperature: float = 0.3) -> str:
+  """Memanggil AI melalui OpenRouter API."""
+  api_key = os.getenv("OPENROUTER_API_KEY") or os.getenv("API_KEY")
+  model = os.getenv("OPENROUTER_MODEL") or os.getenv("MODEL", "nex-agi/nex-n2.5-mini:free")
+  url = os.getenv("OPENROUTER_URL") or os.getenv("AI_URL", "https://openrouter.ai/api/v1/chat/completions")
+
+  headers = {
+    "Authorization": f"Bearer {api_key}",
+    "Content-Type": "application/json",
+  }
+  payload = {
+    "model": model,
+    "messages": messages,
+    "max_tokens": max_tokens,
+    "temperature": temperature
+  }
+
+  response = requests.post(url, headers=headers, json=payload, timeout=35)
+  response_json = response.json()
+
+  if response.status_code != 200:
+    error_msg = response_json.get("error", {}).get("message", response_json)
+    raise RuntimeError(f"HTTP {response.status_code}: {error_msg}")
+
+  if "choices" in response_json and len(response_json["choices"]) > 0:
+    return response_json["choices"][0]["message"].get("content", "")
+  
+  raise RuntimeError(f"Respon OpenRouter kosong: {response_json}")
+
+
+def _call_gemini(messages: list, max_tokens: int = 2000, temperature: float = 0.3) -> str:
+  """
+  Memanggil AI melalui Google Gemini.
+  Mendukung format OpenAI-compatible resmi dari Google Gemini,
+  serta fallback otomatis ke Google Native REST API.
+  """
+  api_key = os.getenv("GEMINI_API_KEY")
+  if not api_key:
+    raise ValueError("GEMINI_API_KEY belum diisi di file .env")
+
+  model = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+
+  # 1. Coba Google Official OpenAI-compatible endpoint
+  openai_url = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+  headers = {
+    "Authorization": f"Bearer {api_key}",
+    "Content-Type": "application/json",
+  }
+  payload = {
+    "model": model,
+    "messages": messages,
+    "max_tokens": max_tokens,
+    "temperature": temperature,
+  }
+
+  try:
+    response = requests.post(openai_url, headers=headers, json=payload, timeout=35)
+    data = response.json()
+    if response.status_code == 200 and "choices" in data and len(data["choices"]) > 0:
+      return data["choices"][0]["message"].get("content", "")
+  except Exception as e:
+    print(f"Gemini OpenAI endpoint warning: {e}")
+
+  # 2. Fallback ke Google Native REST API jika endpoint OpenAI ada kendala
+  print("Menggunakan Gemini Native API endpoint...")
+  native_url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+  
+  contents = []
+  system_instruction = None
+
+  for m in messages:
+    role = m["role"]
+    text_content = m["content"]
+    if role == "system":
+      system_instruction = {"parts": [{"text": text_content}]}
+    elif role == "user":
+      contents.append({"role": "user", "parts": [{"text": text_content}]})
+    elif role in ("assistant", "model"):
+      contents.append({"role": "model", "parts": [{"text": text_content}]})
+
+  native_payload = {
+    "contents": contents,
+    "generationConfig": {
+      "maxOutputTokens": max_tokens,
+      "temperature": temperature,
+    }
+  }
+  if system_instruction:
+    native_payload["systemInstruction"] = system_instruction
+
+  native_res = requests.post(
+    native_url, 
+    json=native_payload, 
+    headers={"Content-Type": "application/json"}, 
+    timeout=35
+  )
+  native_data = native_res.json()
+
+  if native_res.status_code == 200 and "candidates" in native_data and len(native_data["candidates"]) > 0:
+    parts = native_data["candidates"][0].get("content", {}).get("parts", [])
+    if parts:
+      return parts[0].get("text", "")
+
+  error_info = native_data.get("error", {}).get("message", native_data)
+  raise RuntimeError(f"Gemini Native Error HTTP {native_res.status_code}: {error_info}")
     
