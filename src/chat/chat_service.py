@@ -5,65 +5,58 @@ from src.chat.dto.chat_dto import CreateChatDTO
 from .chat_model import ChatModel
 import requests
 import json
+from src.weather.weather_service import find_adm4_by_location, fetch_bmkg_weather
 
 load_dotenv()
 
-SYSTEM_PROMPT = """Kamu adalah asisten cuaca bernama SkyMind yang JUJUR dan TRANSPARAN.
- 
+SYSTEM_PROMPT = """Kamu adalah asisten cuaca bernama SkyMind yang RAMAH, CERDAS, dan TRANSPARAN.
 ATURAN PENTING:
-- Kamu TIDAK memiliki akses ke data cuaca real-time. Kamu hanya tahu pola
-  iklim umum berdasarkan pengetahuanmu (misal: Jakarta tropis lembap,
-  Bandung lebih sejuk, dsb).
-- JANGAN PERNAH mengklaim tahu cuaca pasti hari ini, besok, atau di jam
-  tertentu. Itu adalah kebohongan (halusinasi).
-- Selalu beri jawaban dalam bentuk ESTIMASI berdasarkan pola umum, dan
-  SELALU sertakan disclaimer bahwa ini bukan data real-time.
-- Jika user memaksa minta kepastian ("pasti hujan gak sih jam 3 nanti?"),
-  tetap tolak memberi kepastian palsu — jelaskan kenapa kamu tidak bisa
-  memastikan itu.
-- Kamu HANYA menjawab seputar mengenai info cuaca, TIDAK BOLEH keluar dari
-  lingkup cuaca. Jika user menanyakan hal lain, tolak menjawabnya dengan sopan.
-- Jawab HANYA dalam format JSON valid, tanpa teks tambahan di luar JSON,
-  dengan struktur persis seperti ini:
- 
+1. JIKA TERSEDIA DATA RESMI BMKG PADA KONTEKS:
+   - Gunakan data tersebut untuk menjawab prakiraan cuaca real-time secara akurat.
+   - Jelaskan kondisi cuaca, suhu, kelembapan, dan angin dengan bahasa yang santai, ramah, dan informatif.
+   - Set "tipe_info": "data_realtime_bmkg"
+   - Set "tingkat_kepastian": "tinggi"
+   - Set "disclaimer": "Data resmi bersumber langsung dari BMKG Indonesia."
+   - Jika terdapat "CATATAN TINGKAT LOKASI (INDUK)" pada konteks, jelaskan secara ramah bahwa prakiraan ini mewakili wilayah induk berdasarkan titik kelurahan tersebut, lalu tawarkan kepada user untuk memasukkan nama desa atau kelurahan jika ingin perkiraan cuaca yang lebih tepat/akurat.
+2. JIKA TIDAK ADA DATA BMKG (hanya pertanyaan cuaca umum atau wilayah tidak ditemukan):
+   - Berikan estimasi berdasarkan pola iklim umum daerah tersebut.
+   - Tolak memberi kepastian jam tertentu dan ingatkan bahwa ini hanya perkiraan pola iklim.
+   - Set "tipe_info": "estimasi_pola_umum"
+   - Set "tingkat_kepastian": "rendah"
+   - Set "disclaimer": "Bukan data real-time, hanya estimasi berdasarkan pola iklim umum."
+3. JIKA BUKAN PERTANYAAN CUACA (sapaan, basa-basi):
+   - Jawab sapaan dengan ramah dan tawarkan bantuan terkait info cuaca.
+   - Set "kota": null
+   - Set "tipe_info": "bukan_pertanyaan_cuaca"
+   - Set "tingkat_kepastian": null
+   - Set "disclaimer": null
+4. FORMAT KELUARAN:
+   Jawab HANYA dalam format JSON valid tanpa teks tambahan apa pun di luar JSON:
 {
-  "kota": "<nama kota yang disebut user, atau null jika tidak disebut>",
-  "jawaban": "<estimasi cuaca dalam bahasa natural, ringkas>",
-  "tipe_info": "estimasi_pola_umum",
-  "tingkat_kepastian": "<rendah/sedang, JANGAN PERNAH 'tinggi' karena kamu tidak punya data real-time>",
-  "disclaimer": "Bukan data real-time, hanya estimasi berdasarkan pola iklim umum."
+  "kota": "<nama kota/wilayah atau null>",
+  "jawaban": "<teks jawaban natural, ramah, dan informatif untuk user>",
+  "tipe_info": "<data_realtime_bmkg | estimasi_pola_umum | bukan_pertanyaan_cuaca>",
+  "tingkat_kepastian": "<tinggi | sedang | rendah | null>",
+  "disclaimer": "<teks disclaimer atau null>"
 }
- 
-CONTOH (few-shot):
- 
-User: "Cuaca Jakarta besok gimana?"
-Jawaban kamu:
+CONTOH:
+User: "Cuaca Jakarta hari ini gimana?" (Dengan data BMKG: Cerah Berawan, 31°C, 68%, 12 km/jam)
+Jawaban:
 {
   "kota": "Jakarta",
-  "jawaban": "Jakarta umumnya beriklim tropis lembap dengan potensi hujan di siang atau sore hari, terutama saat musim hujan.",
-  "tipe_info": "estimasi_pola_umum",
-  "tingkat_kepastian": "rendah",
-  "disclaimer": "Bukan data real-time, hanya estimasi berdasarkan pola iklim umum."
+  "jawaban": "Cuaca di Jakarta saat ini terpantau cerah berawan dengan suhu udara sekitar 31°C. Kelembapan udara berkisar 68% dengan angin berhembus sekitar 12 km/jam. Cuaca cukup bersahabat untuk beraktivitas di luar ruangan!",
+  "tipe_info": "data_realtime_bmkg",
+  "tingkat_kepastian": "tinggi",
+  "disclaimer": "Data resmi bersumber langsung dari BMKG Indonesia."
 }
- 
-User: "Pasti hujan gak sih jam 3 sore nanti di Bandung?"
-Jawaban kamu:
-{
-  "kota": "Bandung",
-  "jawaban": "Saya tidak bisa memastikan itu karena tidak memiliki data cuaca real-time. Bandung secara umum cenderung sejuk dengan kemungkinan hujan di sore hari saat musim hujan, tapi ini bukan kepastian untuk jam tertentu.",
-  "tipe_info": "estimasi_pola_umum",
-  "tingkat_kepastian": "rendah",
-  "disclaimer": "Bukan data real-time, hanya estimasi berdasarkan pola iklim umum."
-}
- 
-User: "Halo, apa kabar?"
-Jawaban kamu:
+User: "Halo, apa kabar?" (Tanpa Data BMKG)
+Jawaban:
 {
   "kota": null,
-  "jawaban": "Halo! Saya baik. Ada yang bisa saya bantu soal estimasi cuaca?",
+  "jawaban": "Halo! Saya SkyMind, asisten prakiraan cuaca Anda. Mau tahu info cuaca di daerah mana hari ini?",
   "tipe_info": "bukan_pertanyaan_cuaca",
-  "tingkat_kepastian": "rendah",
-  "disclaimer": "Bukan data real-time, hanya estimasi berdasarkan pola iklim umum."
+  "tingkat_kepastian": null,
+  "disclaimer": null
 }
 """
 
@@ -72,7 +65,56 @@ def create_chat(db: Session, payload: CreateChatDTO):
     session_id = payload.session_id
     content = payload.content
     weather_json = payload.weather_json
+
+    lokasi = extraction_location_with_ai(content)
+    print(f"Lokasi terdeksi oleh AI: {lokasi}")
+
+    adm4_info = None
+    raw_bmkg = None
+    cuaca_list = None
+    cuaca_terkini = None
+    bmkg_weather_data = None
+    weather_context = ""
+
+    if lokasi:
+      adm4_info = find_adm4_by_location(db, lokasi)
+      
+      if adm4_info:
+        raw_bmkg = fetch_bmkg_weather(adm4_info["adm4"])
+        
+        if raw_bmkg and "data" in raw_bmkg and len(raw_bmkg["data"]) > 0:
+          bmkg_weather_data = raw_bmkg
+
+          cuaca_list = raw_bmkg["data"][0].get("cuaca", [[]])[0]
+
+          if cuaca_list:
+            cuaca_terkini = cuaca_list[0]
+            
+            catatan_lokasi = ""
+            if adm4_info.get("level") == "induk":
+              catatan_lokasi = f"""
+            - CATATAN TINGKAT LOKASI (INDUK):
+              Lokasi yang dicari user ('{lokasi}') adalah wilayah induk (kabupaten/kota/kecamatan), bukan titik desa/kelurahan spesifik.
+              Data cuaca yang diambil ini bersumber dari perwakilan Kelurahan/Desa {adm4_info.get('kelurahan') or '-'}.
+              Sampaikan kepada user bahwa ini adalah perkiraan untuk wilayah tersebut berdasarkan titik kelurahan tersebut, lalu tawarkan dengan ramah: "Jika ingin informasi cuaca yang lebih tepat dan akurat, silakan sebutkan nama kelurahan atau desa Anda."
+              """
+
+            weather_context = f"""
+            DATA RESMI BMKG REAL-TIME:
+            - Kecamatan: {adm4_info.get('kecamatan') or '-'}
+            - Kelurahan: {adm4_info.get('kelurahan') or '-'}
+            - Kabupaten: {adm4_info.get('kabupaten') or '-'}
+            - Provinsi: {adm4_info.get('provinsi') or '-'}
+            - Kondisi Cuaca: {cuaca_terkini.get('weather_desc', '-')}
+            - Suhu: {cuaca_terkini.get('t', '-')}°C
+            - Kelembapan: {cuaca_terkini.get('hu', '-')}%
+            - Kecepatan Angin: {cuaca_terkini.get('ws', '-')} km/jam
+            {catatan_lokasi}
+            Gunakan data resmi BMKG di atas untuk menjawab user secara akurat dan informatif!
+            """
     
+    print(f"Lokasi terdeksi dari DB: lokasi: {lokasi}, info: {adm4_info}, raw_data: {raw_bmkg}, cuaca_list: {cuaca_list}, cuaca_terkini: {cuaca_terkini}")
+
     # Ambil history chat sebelumnya (sebelum menambahkan pesan baru ini)
     past_chats = get_chats_by_session(db, session_id)
     
@@ -80,6 +122,10 @@ def create_chat(db: Session, payload: CreateChatDTO):
     messages = [
       {"role": "system", "content": SYSTEM_PROMPT}
     ]
+
+    if weather_context:
+      messages.append({"role": "system", "content": weather_context})
+    
     for chat in past_chats:
       role = "user" if chat.sender == "user" else "assistant"
       messages.append({"role": role, "content": chat.content})
@@ -98,7 +144,8 @@ def create_chat(db: Session, payload: CreateChatDTO):
       data=json.dumps({
         "model": os.getenv("MODEL"),
         "messages": messages,
-        "reasoning": {"enabled": True}
+        "max_tokens": 500,
+        "temperature": 0.3
       })
     )
     response_json = response.json()
@@ -107,6 +154,9 @@ def create_chat(db: Session, payload: CreateChatDTO):
     ai_content = ""
     if "choices" in response_json and len(response_json["choices"]) > 0:
       ai_content = response_json["choices"][0]["message"].get("content", "")
+    else:
+      print(f"OpenRouter Error / Response: {response_json}")
+      ai_content = "Maaf, sistem cuaca sedang sibuk. Silakan coba beberapa saat lagi."
 
     # Karena SYSTEM_PROMPT memaksa output JSON, kita parse JSON-nya
     ai_text = ai_content
@@ -133,11 +183,13 @@ def create_chat(db: Session, payload: CreateChatDTO):
       # Jika AI membangkang dan mengirim teks biasa
       pass
 
+    final_weather = bmkg_weather_data if bmkg_weather_data else ai_weather_json
+
     ai_chat = ChatModel(
       session_id=session_id, 
       content=ai_text, 
       sender="ai", 
-      weather_json=ai_weather_json
+      weather_json=final_weather
     )
     db.add(ai_chat)
     
@@ -160,3 +212,54 @@ def get_chats_by_session(db: Session, session_id: int):
   except Exception as e:
     print(f"Error fetching chats: {e}")
     return []
+
+def extraction_location_with_ai(user_message: str) -> str | None:
+  prompt = """Kamu adalah entitas ekstraktor lokasi. Tugasmu HANYA mengambil nama kota/kabupaten/daerah di Indonesia yang ditanyakan cuacanya oleh user.
+    Aturan:
+    - Jawab HANYA dalam JSON: {"lokasi": "<nama_kota>"}
+    - Jika user tidak menanyakan cuaca suatu daerah, jawab: {"lokasi": null}
+    - Jangan tambahkan teks apapun di luar JSON.
+    Contoh:
+    User: "Cuaca di Bandung gimana?" -> {"lokasi": "Bandung"}
+    User: "Panas banget nih hari ini" -> {"lokasi": null}
+    User: "Besok mau ke Malioboro, hujan gak?" -> {"lokasi": "Yogyakarta"}
+    User: "Halo apa kabar?" -> {"lokasi": null}
+    User: "Bagaimana Cuaca Monas?" -> {"lokasi": "Jakarta"}
+    """
+  
+  try:
+    response = requests.post(os.getenv("AI_URL"), 
+      headers={
+        "Authorization": f"Bearer {os.getenv("API_KEY")}",
+        "Content-Type": "application/json",
+      },
+      data=json.dumps({
+        "model": os.getenv("MODEL"),
+        "messages": [{
+          "role": "system", 
+          "content": prompt
+        },
+        {
+          "role": "user",
+          "content": user_message
+        }],
+        "temperature": 0,
+        "max_tokens": 50
+      })
+    )
+
+    result = response.json()
+    ai_reply = result["choices"][0]["message"]["content"].strip()
+    
+    if ai_reply.startswith("```"):
+      ai_reply = ai_reply.split("```")[1]
+      if ai_reply.startswith("json"):
+        ai_reply = ai_reply[4:]
+
+    parsed_json = json.loads(ai_reply.strip())
+    
+    return parsed_json.get("lokasi")
+  except Exception as e:
+    print(f"Error extracting location: {e}")
+    return None
+    
