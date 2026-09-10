@@ -46,7 +46,7 @@ async def get_chats_endpoint(
       {
         "id": chat.id,
         "session_id": chat.session_id,
-        "sender": getattr(chat, "sender", None),
+        "role": getattr(chat, "sender", None),
         "content": chat.content,
         "weather_json": getattr(chat, "weather_json", None),
         "created_at": chat.created_at
