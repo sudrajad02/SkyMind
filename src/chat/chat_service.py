@@ -97,9 +97,9 @@ def create_chat(db: Session, payload: CreateChatDTO, current_user: UserModel):
     weather_json = payload.weather_json
 
     if not session_id:
-      clean_title = payload.content.strip().replace("\n", " ")[:40]
+      session_title = generate_session_title(content)
       new_session = SessionModel(
-        title = clean_title,
+        title = session_title,
         user_id = current_user.id
       )
       db.add(new_session)
@@ -280,7 +280,7 @@ def extraction_location_with_ai(user_message: str) -> str | None:
       {"role": "system", "content": prompt},
       {"role": "user", "content": user_message}
     ]
-    ai_reply = call_ai_chat(messages, max_tokens=300, temperature=0.0).strip()
+    ai_reply = call_ai_chat(messages, max_tokens=100, temperature=0.0, is_fast_task=True).strip()
     
     if ai_reply.startswith("```"):
       ai_reply = ai_reply.split("```")[1]
@@ -294,38 +294,97 @@ def extraction_location_with_ai(user_message: str) -> str | None:
     return None
 
 
-def call_ai_chat(messages: list, max_tokens: int = 2000, temperature: float = 0.3) -> str:
+def generate_session_title(user_message: str) -> str:
+  """
+  Menghasilkan judul sesi obrolan yang ringkas (3-5 kata) menggunakan model AI ringan/cepat.
+  Menghemat kuota token secara signifikan dan merespon jauh lebih cepat.
+  Jika gagal atau timeout, secara elegan fallback ke cuplikan pesan pertama.
+  """
+  fallback = user_message.strip().replace("\n", " ")[:40]
+  prompt = """Kamu adalah asisten pembuat judul percakapan seperti ChatGPT, Claude, dan Gemini.
+Tugasmu: Buat SATU judul yang sangat singkat, padat, dan representatif (maksimal 3 sampai 5 kata) dalam Bahasa Indonesia untuk pesan awal pengguna berikut.
+Aturan:
+- HANYA kembalikan teks judulnya saja, tanpa tanda petik (" atau '), tanpa kurung, dan tanpa titik di akhir.
+- JANGAN sertakan awalan seperti "Judul: " atau kata pengantar apapun.
+- Jika menanyakan cuaca suatu wilayah, sebutkan nama daerah dan topiknya (Contoh: "Prakiraan Cuaca Jakarta", "Cuaca Hujan di Bandung").
+- Jika ada keterangan waktunya (contoh hari ini, besok, lusa) masukkan ke dalam judul (Contoh: "Prakiraan Cuaca Jakarta Hari Ini", "Prakiraan Cuaca Bandung Besok", "Prakiraan Cuaca Bandung Bulan Depan").
+- Jika percakapan santai atau sapaan, buat judul yang relevan (Contoh: "Sapaan dan Obrolan", "Pertanyaan Umum").
+"""
+  try:
+    messages = [
+      {"role": "system", "content": prompt},
+      {"role": "user", "content": user_message}
+    ]
+    title = call_ai_chat(messages, max_tokens=80, temperature=0.3, is_fast_task=True).strip()
+    
+    # Bersihkan blok reasoning <think>...</think> jika ada
+    if "<think>" in title and "</think>" in title:
+      title = title.split("</think>")[-1].strip()
+
+    title = title.replace('"', '').replace("'", "").replace("*", "").replace("#", "").replace("\n", " ").strip()
+    if title.lower().startswith("judul:"):
+      title = title[6:].strip()
+    elif title.lower().startswith("judul :"):
+      title = title[7:].strip()
+    title = title.rstrip(".")
+
+    if title and len(title) <= 60:
+      return title
+    return fallback
+  except Exception as e:
+    print(f"Error generating session title: {e}")
+    return fallback
+
+
+
+def call_ai_chat(
+  messages: list, 
+  max_tokens: int = 2000, 
+  temperature: float = 0.3, 
+  model: str | None = None,
+  is_fast_task: bool = False
+) -> str:
   """
   Fungsi terpusat untuk memanggil AI.
   Mendukung provider: 'openrouter' atau 'gemini' (berdasarkan setting AI_PROVIDER di .env).
+  Mendukung override model atau is_fast_task=True untuk tugas ringan (seperti judul & lokasi) agar hemat kuota.
   Dilengkapi automatic fallback jika provider utama mengalami error / rate limit (429).
   """
   provider = (os.getenv("AI_PROVIDER") or "openrouter").strip().lower()
 
+  # Tentukan model jika tugas ringan (is_fast_task)
+  if is_fast_task and not model:
+    if provider == "gemini":
+      model = os.getenv("GEMINI_FAST_MODEL") or os.getenv("FAST_MODEL") or "gemini-3.5-flash-lite"
+    else:
+      model = os.getenv("OPENROUTER_FAST_MODEL") or os.getenv("FAST_MODEL") or "liquid/lfm-2.5-2.6b:free"
+
   if provider == "gemini":
     try:
-      return _call_gemini(messages, max_tokens, temperature)
+      return _call_gemini(messages, max_tokens, temperature, model=model)
     except Exception as e:
       print(f"[Gemini Error]: {e}")
       if os.getenv("API_KEY") or os.getenv("OPENROUTER_API_KEY"):
         print("-> Mencoba fallback ke OpenRouter...")
-        return _call_openrouter(messages, max_tokens, temperature)
+        fallback_model = (os.getenv("OPENROUTER_FAST_MODEL") or "meta-llama/llama-3.2-3b-instruct:free") if is_fast_task else None
+        return _call_openrouter(messages, max_tokens, temperature, model=fallback_model)
       raise e
   else:
     try:
-      return _call_openrouter(messages, max_tokens, temperature)
+      return _call_openrouter(messages, max_tokens, temperature, model=model)
     except Exception as e:
       print(f"[OpenRouter Error]: {e}")
       if os.getenv("GEMINI_API_KEY"):
         print("-> Mencoba fallback ke Google Gemini...")
-        return _call_gemini(messages, max_tokens, temperature)
+        fallback_model = (os.getenv("GEMINI_FAST_MODEL") or "gemini-2.0-flash-lite") if is_fast_task else None
+        return _call_gemini(messages, max_tokens, temperature, model=fallback_model)
       raise e
 
 
-def _call_openrouter(messages: list, max_tokens: int = 2000, temperature: float = 0.3) -> str:
+def _call_openrouter(messages: list, max_tokens: int = 2000, temperature: float = 0.3, model: str | None = None) -> str:
   """Memanggil AI melalui OpenRouter API."""
   api_key = os.getenv("OPENROUTER_API_KEY") or os.getenv("API_KEY")
-  model = os.getenv("OPENROUTER_MODEL") or os.getenv("MODEL", "nex-agi/nex-n2.5-mini:free")
+  selected_model = model or os.getenv("OPENROUTER_MODEL") or os.getenv("MODEL", "nex-agi/nex-n2.5-mini:free")
   url = os.getenv("OPENROUTER_URL") or os.getenv("AI_URL", "https://openrouter.ai/api/v1/chat/completions")
 
   headers = {
@@ -333,7 +392,7 @@ def _call_openrouter(messages: list, max_tokens: int = 2000, temperature: float 
     "Content-Type": "application/json",
   }
   payload = {
-    "model": model,
+    "model": selected_model,
     "messages": messages,
     "max_tokens": max_tokens,
     "temperature": temperature
@@ -352,7 +411,7 @@ def _call_openrouter(messages: list, max_tokens: int = 2000, temperature: float 
   raise RuntimeError(f"Respon OpenRouter kosong: {response_json}")
 
 
-def _call_gemini(messages: list, max_tokens: int = 2000, temperature: float = 0.3) -> str:
+def _call_gemini(messages: list, max_tokens: int = 2000, temperature: float = 0.3, model: str | None = None) -> str:
   """
   Memanggil AI melalui Google Gemini.
   Mendukung format OpenAI-compatible resmi dari Google Gemini,
@@ -362,7 +421,7 @@ def _call_gemini(messages: list, max_tokens: int = 2000, temperature: float = 0.
   if not api_key:
     raise ValueError("GEMINI_API_KEY belum diisi di file .env")
 
-  model = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+  selected_model = model or os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
 
   # 1. Coba Google Official OpenAI-compatible endpoint
   openai_url = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
@@ -371,7 +430,7 @@ def _call_gemini(messages: list, max_tokens: int = 2000, temperature: float = 0.
     "Content-Type": "application/json",
   }
   payload = {
-    "model": model,
+    "model": selected_model,
     "messages": messages,
     "max_tokens": max_tokens,
     "temperature": temperature,
@@ -386,8 +445,8 @@ def _call_gemini(messages: list, max_tokens: int = 2000, temperature: float = 0.
     print(f"Gemini OpenAI endpoint warning: {e}")
 
   # 2. Fallback ke Google Native REST API jika endpoint OpenAI ada kendala
-  print("Menggunakan Gemini Native API endpoint...")
-  native_url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+  print(f"Menggunakan Gemini Native API endpoint dengan model: {selected_model}...")
+  native_url = f"https://generativelanguage.googleapis.com/v1beta/models/{selected_model}:generateContent?key={api_key}"
   
   contents = []
   system_instruction = None
