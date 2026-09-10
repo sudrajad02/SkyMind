@@ -34,6 +34,7 @@ async def login_endpoint(body: LoginDTO, db: Session = Depends(get_db)):
             "user": {
                 "id": user.id,
                 "email": user.email,
+                "full_name": user.full_name,
                 "created_at": user.created_at,
             }
         },
