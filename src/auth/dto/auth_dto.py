@@ -2,6 +2,7 @@ from pydantic import BaseModel, EmailStr, Field
 from datetime import datetime
 
 class RegisterDTO(BaseModel):
+    full_name: str
     email: EmailStr
     password: str = Field(..., min_length=6, description="Password minimal 6 karakter")
 
