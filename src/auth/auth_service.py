@@ -21,6 +21,7 @@ def register_user(db: Session, payload: RegisterDTO) -> UserModel:
     hashed_pwd = hash_password(payload.password)
     new_user = UserModel(
         email=payload.email,
+        full_name=payload.full_name,
         password_hash=hashed_pwd
     )
 
